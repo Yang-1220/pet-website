@@ -18,6 +18,7 @@ const WALK_BONE_HAPPINESS = 1;   // 遛狗彩蛋：捡到骨头增加的愉悦�
 const WALK_FRIEND_INTIMACY = 10; // 遛狗彩蛋：交到新朋友增加的亲密度
 const DEFAULT_NAME = '小狗狗';   // 未取名时显示的默认名字
 const MAX_NAME_LENGTH = 12;      // 名字最大长度
+const DECAY_INTERVAL_MS = 60 * 1000; // 状态自然衰减周期：60 秒
 
 // 读取狗狗状态（pet_stats 表固定只有一行，id = 1）
 async function readStats() {
@@ -186,6 +187,18 @@ app.post('/api/pet/name', async (req, res) => {
     res.status(500).json({ error: '数据库更新失败' });
   }
 });
+
+// 状态自然衰减：每 60 秒 hunger、happiness 各 -1，最低到 0，intimacy 不衰减
+// 只更新 pet_stats，不写入 pet_stats_log（自然衰减不算互动，不进周报快照）
+setInterval(async () => {
+  try {
+    await pool.query(
+      'UPDATE pet_stats SET hunger = GREATEST(0, hunger - 1), happiness = GREATEST(0, happiness - 1)'
+    );
+  } catch (err) {
+    console.error('状态衰减失败:', err.message);
+  }
+}, DECAY_INTERVAL_MS);
 
 app.listen(PORT, () => {
   console.log(`🐶 后端服务已启动: http://localhost:${PORT}`);
