@@ -1,5 +1,8 @@
 <template>
   <div class="page">
+    <!-- 未登录：显示登录/注册视图 -->
+    <AuthView v-if="!currentUser" @logged-in="handleLoggedIn" />
+    <template v-else>
     <header class="page-header">
       <h1>🐶 狗狗养成乐园</h1>
       <p class="subtitle">照顾好你的小狗伙伴吧！</p>
@@ -21,6 +24,10 @@
           @keyup.enter="handleRename"
         />
         <button class="name-btn" :disabled="busy" @click="handleRename">取名</button>
+      </div>
+      <div class="user-bar">
+        <span class="user-badge">👤 {{ currentUser.username }}</span>
+        <button class="logout-btn" @click="handleLogout">退出登录</button>
       </div>
     </header>
 
@@ -98,6 +105,7 @@
     </div>
 
     <footer class="page-footer">状态数据保存在 MySQL · pet_db.pet_stats</footer>
+    </template>
   </div>
 </template>
 
@@ -106,8 +114,9 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import DogStage from './components/DogStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import WeeklyPanel from './components/WeeklyPanel.vue';
-import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog, getWeather, getDiary, createDiary } from './api/pet';
+import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog, getWeather, getDiary, createDiary, getToken, setToken, fetchMe, logoutUser } from './api/pet';
 import DiaryPanel from './components/DiaryPanel.vue';
+import AuthView from './components/AuthView.vue';
 
 const stats = reactive({ hunger: 0, happiness: 0, intimacy: 0 });
 const busy = ref(false);        // 防止连点
@@ -346,17 +355,80 @@ async function refreshAll() {
   }
 }
 
-onMounted(() => {
+// ===== 登录态管理 =====
+const currentUser = ref(null); // { username, dogName }，null 表示未登录
+
+// 登录后启动数据加载与 5 秒轮询
+function startPolling() {
+  clearInterval(refreshTimer);
   refreshAll();
   loadName();
-  loadWeather();
   loadDiary(1);
   refreshTimer = setInterval(refreshAll, 5000);
+}
+
+// 登录/注册成功：保存 token 到 localStorage，进入主界面
+function handleLoggedIn(data) {
+  setToken(data.token);
+  currentUser.value = { username: data.username };
+  dogName.value = '小狗狗'; // 先显示默认名，startPolling 里的 loadName() 会用数据库里的名字覆盖
+  errorMsg.value = '';
+  startPolling();
+}
+
+// 退出登录：后端销毁会话，前端清理 token 与页面数据（避免切换账号残留）
+async function handleLogout() {
+  try {
+    await logoutUser();
+  } catch (err) {
+    console.error('退出请求失败:', err);
+  }
+  setToken('');
+  currentUser.value = null;
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+  stats.hunger = 0;
+  stats.happiness = 0;
+  stats.intimacy = 0;
+  weekly.value = [];
+  diary.value = { page: 1, pageSize: 3, total: 0, items: [] };
+  dogName.value = '小狗狗';
+  bubbleVisible.value = false;
+  errorMsg.value = '';
+}
+
+// 页面刷新时用 localStorage 里的 token 恢复登录态
+onMounted(async () => {
+  loadWeather(); // 天气是公开接口，登录前后都可以拉取
+  if (!getToken()) return;
+  try {
+    const me = await fetchMe();
+    currentUser.value = { username: me.username };
+    dogName.value = '小狗狗'; // 先显示默认名，startPolling 里的 loadName() 会覆盖
+    startPolling();
+  } catch (err) {
+    // token 已失效：拦截器会清除本地 token，停留在登录页
+    console.error('恢复登录态失败:', err);
+  }
 });
 
-// 组件卸载 / 页面关闭时清除定时器
+// 任意接口返回 401（token 失效/被顶下线）时切回登录页
+function handleUnauthorized() {
+  if (currentUser.value) {
+    currentUser.value = null;
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('pet:unauthorized', handleUnauthorized);
+});
+
+// 组件卸载 / 页面关闭时清除定时器与事件监听
 onUnmounted(() => {
   clearInterval(refreshTimer);
+  window.removeEventListener('pet:unauthorized', handleUnauthorized);
 });
 
 </script>
@@ -468,6 +540,40 @@ onUnmounted(() => {
 .name-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* 用户信息栏 */
+.user-bar {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-badge {
+  font-size: 13px;
+  color: #6b5140;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid #f2e2cd;
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+.logout-btn {
+  padding: 4px 14px;
+  font-size: 13px;
+  color: #9b8271;
+  background: transparent;
+  border: 1.5px solid #e8d5bc;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.logout-btn:hover {
+  color: #cf1322;
+  border-color: #ffccc7;
 }
 
 .alert {

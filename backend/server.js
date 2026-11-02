@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const pool = require('./db');
 
 const app = express();
@@ -91,20 +92,144 @@ app.get('/api/pet/weather', async (req, res) => {
   }
 });
 
-// 读取狗狗状态（pet_stats 表固定只有一行，id = 1）
-async function readStats() {
+// ===== 用户认证（注册 / 登录 / 会话 token） =====
+const MIN_USERNAME_LENGTH = 2;
+const MAX_USERNAME_LENGTH = 16;
+const MIN_PASSWORD_LENGTH = 6;
+const SCRYPT_KEYLEN = 64; // scrypt 摘要长度（字节）
+
+// 生成密码摘要（Node 内置 crypto 的 scrypt + 每用户独立随机盐，无需第三方库）
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, SCRYPT_KEYLEN).toString('hex');
+}
+
+// 创建一条会话记录，返回随机 token
+async function createSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  await pool.query('INSERT INTO sessions (token, user_id) VALUES (?, ?)', [token, userId]);
+  return token;
+}
+
+// 认证中间件：校验 Authorization: Bearer <token>，通过后挂上 req.user
+async function requireAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token) {
+    return res.status(401).json({ error: '未登录' });
+  }
+  try {
+    const [rows] = await pool.query(
+      'SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?',
+      [token]
+    );
+    if (!rows[0]) {
+      return res.status(401).json({ error: '登录已失效，请重新登录' });
+    }
+    req.user = rows[0];
+    next();
+  } catch (err) {
+    console.error('身份验证失败:', err.message);
+    res.status(500).json({ error: '身份验证失败' });
+  }
+}
+
+// 注册：创建用户并为其播种一份初始狗狗数据（饱食度 80 / 愉悦度 80 / 亲密度 50）
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const username = String((req.body && req.body.username) || '').trim();
+    const password = String((req.body && req.body.password) || '');
+    if (username.length < MIN_USERNAME_LENGTH || username.length > MAX_USERNAME_LENGTH) {
+      return res.status(400).json({ error: `用户名需要 ${MIN_USERNAME_LENGTH}-${MAX_USERNAME_LENGTH} 个字符` });
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ error: `密码至少 ${MIN_PASSWORD_LENGTH} 位` });
+    }
+    const [exists] = await pool.query('SELECT id FROM users WHERE username = ?', [username]);
+    if (exists.length > 0) {
+      return res.status(409).json({ error: '用户名已被注册' });
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(password, salt);
+    const [result] = await pool.query(
+      'INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)',
+      [username, passwordHash, salt]
+    );
+    const userId = result.insertId;
+    // 为新用户播种狗狗初始数据（状态 + 默认名字）
+    await pool.query(
+      'INSERT INTO pet_stats (user_id, hunger, happiness, intimacy) VALUES (?, ?, ?, ?)',
+      [userId, 80, 80, 50]
+    );
+    await pool.query(
+      'INSERT INTO pet_info (user_id, name) VALUES (?, ?)',
+      [userId, DEFAULT_NAME]
+    );
+    const token = await createSession(userId);
+    res.json({ token, username });
+  } catch (err) {
+    console.error('注册失败:', err.message);
+    res.status(500).json({ error: '注册失败，请稍后重试' });
+  }
+});
+
+// 登录：校验用户名密码，签发新 token
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const username = String((req.body && req.body.username) || '').trim();
+    const password = String((req.body && req.body.password) || '');
+    if (!username || !password) {
+      return res.status(400).json({ error: '请输入用户名和密码' });
+    }
+    const [rows] = await pool.query('SELECT id, username, password_hash, salt FROM users WHERE username = ?', [username]);
+    const user = rows[0];
+    if (!user) {
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    const candidate = Buffer.from(hashPassword(password, user.salt), 'hex');
+    const stored = Buffer.from(user.password_hash, 'hex');
+    if (candidate.length !== stored.length || !crypto.timingSafeEqual(candidate, stored)) {
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    const token = await createSession(user.id);
+    res.json({ token, username: user.username });
+  } catch (err) {
+    console.error('登录失败:', err.message);
+    res.status(500).json({ error: '登录失败，请稍后重试' });
+  }
+});
+
+// 退出登录：删除当前 token 对应的会话
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM sessions WHERE token = ?', [req.headers.authorization.slice(7).trim()]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('退出失败:', err.message);
+    res.status(500).json({ error: '退出失败' });
+  }
+});
+
+// 当前登录用户信息（用于页面刷新后恢复登录态）
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ username: req.user.username });
+});
+
+// 读取狗狗状态（每个用户一条 pet_stats 记录，按 user_id 隔离）
+async function readStats(userId) {
   const [rows] = await pool.query(
-    'SELECT hunger, happiness, intimacy FROM pet_stats WHERE id = 1'
+    'SELECT hunger, happiness, intimacy FROM pet_stats WHERE user_id = ?',
+    [userId]
   );
   return rows[0] || null;
 }
 
 // 记录一次状态快照到 pet_stats_log（喂食/抚摸/遛狗后调用，供周报折线图使用）
-async function logStats() {
-  const stats = await readStats();
+async function logStats(userId) {
+  const stats = await readStats(userId);
+  if (!stats) return;
   await pool.query(
-    'INSERT INTO pet_stats_log (hunger, happiness, intimacy) VALUES (?, ?, ?)',
-    [stats.hunger, stats.happiness, stats.intimacy]
+    'INSERT INTO pet_stats_log (user_id, hunger, happiness, intimacy) VALUES (?, ?, ?, ?)',
+    [userId, stats.hunger, stats.happiness, stats.intimacy]
   );
 }
 
@@ -113,10 +238,10 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// 获取狗狗状态
-app.get('/api/pet/stats', async (req, res) => {
+// 获取狗狗状态（需登录，只返回当前用户的狗狗数据）
+app.get('/api/pet/stats', requireAuth, async (req, res) => {
   try {
-    const stats = await readStats();
+    const stats = await readStats(req.user.id);
     if (!stats) {
       return res.status(404).json({ error: '未找到狗狗状态数据，请先执行 database/init.sql 初始化数据库' });
     }
@@ -128,14 +253,14 @@ app.get('/api/pet/stats', async (req, res) => {
 });
 
 // 喂食：饱食度 +10（不超过 100）
-app.post('/api/pet/feed', async (req, res) => {
+app.post('/api/pet/feed', requireAuth, async (req, res) => {
   try {
     await pool.query(
-      'UPDATE pet_stats SET hunger = LEAST(?, hunger + ?) WHERE id = 1',
-      [MAX_VALUE, FEED_HUNGER]
+      'UPDATE pet_stats SET hunger = LEAST(?, hunger + ?) WHERE user_id = ?',
+      [MAX_VALUE, FEED_HUNGER, req.user.id]
     );
-    await logStats();
-    res.json(await readStats());
+    await logStats(req.user.id);
+    res.json(await readStats(req.user.id));
   } catch (err) {
     console.error('喂食失败:', err.message);
     res.status(500).json({ error: '数据库更新失败' });
@@ -143,18 +268,18 @@ app.post('/api/pet/feed', async (req, res) => {
 });
 
 // 抚摸：愉悦度/亲密度涨幅随天气变化（晴天 +12、阴天 +8、雨天 +4 且亲密度额外 +2）
-app.post('/api/pet/pet', async (req, res) => {
+app.post('/api/pet/pet', requireAuth, async (req, res) => {
   try {
     const weather = await getWeather();
     const happinessGain = PET_HAPPINESS_BY_WEATHER[weather.category] ?? PET_HAPPINESS;
     const intimacyGain = PET_INTIMACY + (weather.category === 'rain' ? RAIN_EXTRA_INTIMACY : 0);
     await pool.query(
-      'UPDATE pet_stats SET happiness = LEAST(?, happiness + ?), intimacy = LEAST(?, intimacy + ?) WHERE id = 1',
-      [MAX_VALUE, happinessGain, MAX_VALUE, intimacyGain]
+      'UPDATE pet_stats SET happiness = LEAST(?, happiness + ?), intimacy = LEAST(?, intimacy + ?) WHERE user_id = ?',
+      [MAX_VALUE, happinessGain, MAX_VALUE, intimacyGain, req.user.id]
     );
-    await logStats();
+    await logStats(req.user.id);
     res.json({
-      ...(await readStats()),
+      ...(await readStats(req.user.id)),
       gains: { happiness: happinessGain, intimacy: intimacyGain },
       weather: weather.category
     });
@@ -168,7 +293,7 @@ app.post('/api/pet/pet', async (req, res) => {
 // - 捡到骨头：愉悦度 +1
 // - 交到新朋友：亲密度 +10
 // - 什么也没发生
-app.post('/api/pet/walk', async (req, res) => {
+app.post('/api/pet/walk', requireAuth, async (req, res) => {
   try {
     const roll = Math.floor(Math.random() * 3);
     let outcome = 'nothing';
@@ -178,29 +303,29 @@ app.post('/api/pet/walk', async (req, res) => {
       outcome = 'bone';
       message = '汪汪！捡到了一块骨头，愉悦度 +1';
       await pool.query(
-        'UPDATE pet_stats SET happiness = LEAST(?, happiness + ?) WHERE id = 1',
-        [MAX_VALUE, WALK_BONE_HAPPINESS]
+        'UPDATE pet_stats SET happiness = LEAST(?, happiness + ?) WHERE user_id = ?',
+        [MAX_VALUE, WALK_BONE_HAPPINESS, req.user.id]
       );
-      await logStats();
+      await logStats(req.user.id);
     } else if (roll === 1) {
       outcome = 'friend';
       message = '汪汪！交到了一只新朋友，亲密度 +10';
       await pool.query(
-        'UPDATE pet_stats SET intimacy = LEAST(?, intimacy + ?) WHERE id = 1',
-        [MAX_VALUE, WALK_FRIEND_INTIMACY]
+        'UPDATE pet_stats SET intimacy = LEAST(?, intimacy + ?) WHERE user_id = ?',
+        [MAX_VALUE, WALK_FRIEND_INTIMACY, req.user.id]
       );
-      await logStats();
+      await logStats(req.user.id);
     }
 
-    res.json({ outcome, message, ...(await readStats()) });
+    res.json({ outcome, message, ...(await readStats(req.user.id)) });
   } catch (err) {
     console.error('遛狗失败:', err.message);
     res.status(500).json({ error: '数据库更新失败' });
   }
 });
 
-// 获取最近 7 天状态趋势（每天取 created_at 最后一条快照的值，即"每日收盘值"，缺数据的天返回 null）
-app.get('/api/pet/weekly', async (req, res) => {
+// 获取最近 7 天状态趋势（每天取 created_at 最后一条快照的值，即"每日收盘值"，缺数据的天返回 null；只统计当前用户）
+app.get('/api/pet/weekly', requireAuth, async (req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT DATE_FORMAT(l.created_at, '%Y-%m-%d') AS day,
@@ -209,9 +334,10 @@ app.get('/api/pet/weekly', async (req, res) => {
        JOIN (
          SELECT MAX(id) AS id
          FROM pet_stats_log
-         WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+         WHERE user_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
          GROUP BY DATE(created_at)
-       ) m ON l.id = m.id`
+       ) m ON l.id = m.id`,
+      [req.user.id]
     );
     const byDay = new Map(rows.map((r) => [r.day, r]));
     const days = [];
@@ -234,19 +360,19 @@ app.get('/api/pet/weekly', async (req, res) => {
   }
 });
 
-// 获取狗狗名字（未取名时返回默认名）
-app.get('/api/pet/name', async (req, res) => {
+// 获取狗狗名字（存于 pet_info 表，按用户隔离；未取名时返回默认名）
+app.get('/api/pet/name', requireAuth, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT name FROM pet_info WHERE id = 1');
-    res.json({ name: rows[0] ? rows[0].name : DEFAULT_NAME });
+    const [rows] = await pool.query('SELECT name FROM pet_info WHERE user_id = ?', [req.user.id]);
+    res.json({ name: rows[0] && rows[0].name ? rows[0].name : DEFAULT_NAME });
   } catch (err) {
     console.error('查询名字失败:', err.message);
     res.status(500).json({ error: '数据库查询失败' });
   }
 });
 
-// 给狗狗取名/改名（保存到 pet_info 表，持久生效）
-app.post('/api/pet/name', async (req, res) => {
+// 给狗狗取名/改名（保存到 pet_info 表，按用户隔离，持久生效）
+app.post('/api/pet/name', requireAuth, async (req, res) => {
   try {
     const name = String((req.body && req.body.name) || '').trim();
     if (!name) {
@@ -256,8 +382,8 @@ app.post('/api/pet/name', async (req, res) => {
       return res.status(400).json({ error: `名字最多 ${MAX_NAME_LENGTH} 个字` });
     }
     await pool.query(
-      'INSERT INTO pet_info (id, name) VALUES (1, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)',
-      [name]
+      'INSERT INTO pet_info (user_id, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)',
+      [req.user.id, name]
     );
     res.json({ name });
   } catch (err) {
@@ -297,22 +423,23 @@ function pickOne(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// 生成（或覆盖）今天的日记
-async function generateTodayDiary() {
-  const stats = await readStats();
+// 生成（或覆盖）今天的日记（按用户隔离）
+async function generateTodayDiary(userId) {
+  const stats = await readStats(userId);
   if (!stats) throw new Error('还没有狗狗状态数据');
 
   const weather = await getWeather();
 
-  // 今天的互动次数（每次喂食/抚摸/散步都会写一条快照）
+  // 今天的互动次数（每次喂食/抚摸/散步都会写一条快照，只统计当前用户）
   const [countRows] = await pool.query(
-    'SELECT COUNT(*) AS c FROM pet_stats_log WHERE DATE(created_at) = CURDATE()'
+    'SELECT COUNT(*) AS c FROM pet_stats_log WHERE user_id = ? AND DATE(created_at) = CURDATE()',
+    [userId]
   );
   const interactions = Number(countRows[0].c) || 0;
 
-  // 狗狗名字
-  const [nameRows] = await pool.query('SELECT name FROM pet_info WHERE id = 1');
-  const name = nameRows[0] ? nameRows[0].name : DEFAULT_NAME;
+  // 狗狗名字（pet_info，按用户）
+  const [nameRows] = await pool.query('SELECT name FROM pet_info WHERE user_id = ?', [userId]);
+  const name = nameRows[0] && nameRows[0].name ? nameRows[0].name : DEFAULT_NAME;
 
   // 心情判定（与前端表情规则一致）
   let mood = 'normal';
@@ -327,25 +454,25 @@ async function generateTodayDiary() {
     `现在饱食度 ${stats.hunger}、愉悦度 ${stats.happiness}、亲密度 ${stats.intimacy}。${body}`;
 
   await pool.query(
-    `INSERT INTO pet_diary (day, mood, weather, content)
-     VALUES (CURDATE(), ?, ?, ?)
+    `INSERT INTO pet_diary (user_id, day, mood, weather, content)
+     VALUES (?, CURDATE(), ?, ?, ?)
      ON DUPLICATE KEY UPDATE mood = VALUES(mood), weather = VALUES(weather), content = VALUES(content)`,
-    [mood, weather.category, content]
+    [userId, mood, weather.category, content]
   );
 
   return { name, mood, weather: weather.category, interactions, content };
 }
 
-// 日记列表（分页，最新在前）
-app.get('/api/pet/diary', async (req, res) => {
+// 日记列表（分页，最新在前，只看自己的日记）
+app.get('/api/pet/diary', requireAuth, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = 3;
-    const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM pet_diary');
+    const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM pet_diary WHERE user_id = ?', [req.user.id]);
     const [rows] = await pool.query(
       `SELECT id, DATE_FORMAT(day, '%Y-%m-%d') AS day, mood, weather, content
-       FROM pet_diary ORDER BY day DESC LIMIT ? OFFSET ?`,
-      [pageSize, (page - 1) * pageSize]
+       FROM pet_diary WHERE user_id = ? ORDER BY day DESC LIMIT ? OFFSET ?`,
+      [req.user.id, pageSize, (page - 1) * pageSize]
     );
     res.json({ page, pageSize, total: Number(total), items: rows });
   } catch (err) {
@@ -355,9 +482,9 @@ app.get('/api/pet/diary', async (req, res) => {
 });
 
 // 写今天的日记（重复调用会覆盖当天那条）
-app.post('/api/pet/diary', async (req, res) => {
+app.post('/api/pet/diary', requireAuth, async (req, res) => {
   try {
-    const entry = await generateTodayDiary();
+    const entry = await generateTodayDiary(req.user.id);
     res.json(entry);
   } catch (err) {
     console.error('写日记失败:', err.message);
@@ -366,7 +493,7 @@ app.post('/api/pet/diary', async (req, res) => {
 });
 
 // 状态自然衰减：每 60 秒 hunger、happiness 各 -1，最低到 0，intimacy 不衰减
-// 只更新 pet_stats，不写入 pet_stats_log（自然衰减不算互动，不进周报快照）
+// 全表更新：所有用户的狗狗同步衰减；不写入 pet_stats_log（自然衰减不算互动，不进周报快照）
 setInterval(async () => {
   try {
     await pool.query(

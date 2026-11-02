@@ -86,7 +86,11 @@ npm run dev
 | 方法 | 路径 | 说明 | 返回 |
 | --- | --- | --- | --- |
 | GET | `/api/health` | 健康检查 | `{ status: "ok" }` |
-| GET | `/api/pet/stats` | 获取狗狗状态 | `{ hunger, happiness, intimacy }` |
+| POST | `/api/auth/register` | 注册：用户名 2-16 字符、密码 ≥6 位（scrypt 加盐哈希存储），注册即登录并播种狗狗初始数据 | `{ token, username }` |
+| POST | `/api/auth/login` | 登录：校验用户名密码，签发会话 token | `{ token, username }` |
+| POST | `/api/auth/logout` | 退出登录：销毁当前 token 对应会话 | `{ ok: true }` |
+| GET | `/api/auth/me` | 恢复登录态：用 token 换当前用户信息 | `{ username }` |
+| GET | `/api/pet/stats` | 获取狗狗状态（需登录，按用户隔离） | `{ hunger, happiness, intimacy }` |
 | GET | `/api/pet/weekly` | 最近 7 天状态趋势（每天取当天最后一条快照，即"每日收盘值"，无数据的天为 null） | `[{ date, hunger, happiness, intimacy } × 7]` |
 | GET | `/api/pet/name` | 获取狗狗名字（未取名返回默认「小狗狗」） | `{ name }` |
 | POST | `/api/pet/name` | 给狗狗取名/改名（≤12 字，持久保存） | `{ name }` |
