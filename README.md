@@ -1,4 +1,4 @@
-# 🐶 狗狗养成互动网页🔗 在线体验：https://be90026e4b6d52.lhr.life
+# 🐶 狗狗养成互动网页🔗 在线体验：https://ceramic-chains-bobby-horse.trycloudflare.com
 
 一个简单有趣的狗狗养成互动项目：喂食、抚摸你的小狗，三项状态指标实时保存到 MySQL 数据库。
 
