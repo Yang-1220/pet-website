@@ -30,6 +30,13 @@
       <!-- 周报统计面板（左侧） -->
       <aside class="weekly-panel">
         <WeeklyPanel :data="weekly" />
+        <DiaryPanel
+          :data="diary"
+          :busy="diaryBusy"
+          @prev="diaryPrev"
+          @next="diaryNext"
+          @generate="diaryGenerate"
+        />
       </aside>
 
       <main class="pet-card">
@@ -99,7 +106,8 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import DogStage from './components/DogStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import WeeklyPanel from './components/WeeklyPanel.vue';
-import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog, getWeather } from './api/pet';
+import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog, getWeather, getDiary, createDiary } from './api/pet';
+import DiaryPanel from './components/DiaryPanel.vue';
 
 const stats = reactive({ hunger: 0, happiness: 0, intimacy: 0 });
 const busy = ref(false);        // 防止连点
@@ -113,6 +121,8 @@ const weekly = ref([]);           // 最近 7 天趋势数据（狗狗周报）
 const dogName = ref('小狗狗');    // 狗狗名字（未取名时为默认名）
 const nameInput = ref('');        // 取名输入框
 const weather = ref({ icon: '☁️', label: '阴天', temperature: null, city: '重庆' }); // 当前天气
+const diary = ref({ page: 1, pageSize: 3, total: 0, items: [] }); // 狗狗日记（分页）
+const diaryBusy = ref(false);      // 正在写日记
 let floatId = 0;
 let bubbleTimer = null;
 let feedAnimTimer = null;
@@ -200,6 +210,40 @@ async function loadWeather() {
     weather.value = await getWeather();
   } catch (err) {
     console.error('天气加载失败:', err);
+  }
+}
+
+// ===== 狗狗日记 =====
+async function loadDiary(page = diary.value.page) {
+  try {
+    diary.value = await getDiary(page);
+  } catch (err) {
+    console.error('日记加载失败:', err);
+  }
+}
+
+function diaryPrev() {
+  if (diary.value.page > 1) loadDiary(diary.value.page - 1);
+}
+
+function diaryNext() {
+  const maxPage = Math.max(1, Math.ceil(diary.value.total / (diary.value.pageSize || 3)));
+  if (diary.value.page < maxPage) loadDiary(diary.value.page + 1);
+}
+
+// 让狗狗写今天的日记（重复点会覆盖当天那条，不会产生重复）
+async function diaryGenerate() {
+  if (diaryBusy.value) return;
+  diaryBusy.value = true;
+  try {
+    await createDiary();
+    await loadDiary(1);
+    showBubble('汪！日记写完啦～');
+  } catch (err) {
+    console.error('写日记失败:', err);
+    errorMsg.value = '写日记失败，请确认后端已启动';
+  } finally {
+    diaryBusy.value = false;
   }
 }
 
@@ -306,6 +350,7 @@ onMounted(() => {
   refreshAll();
   loadName();
   loadWeather();
+  loadDiary(1);
   refreshTimer = setInterval(refreshAll, 5000);
 });
 

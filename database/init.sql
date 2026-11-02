@@ -40,3 +40,14 @@ CREATE TABLE IF NOT EXISTS pet_info (
 -- 初始化狗狗信息（已存在则跳过，不会覆盖已取的名字）
 INSERT INTO pet_info (id, name) VALUES (1, '小狗狗')
 ON DUPLICATE KEY UPDATE id = id;
+
+-- 狗狗日记表：每天一条，由后端按当天心情/天气/互动次数生成
+CREATE TABLE IF NOT EXISTS pet_diary (
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  day DATE NOT NULL COMMENT '日记日期，一天一条',
+  mood VARCHAR(16) NOT NULL DEFAULT 'normal' COMMENT '当时心情',
+  weather VARCHAR(16) NOT NULL DEFAULT 'cloudy' COMMENT '当天天气',
+  content VARCHAR(500) NOT NULL COMMENT '日记正文',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_day (day)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '狗狗日记';

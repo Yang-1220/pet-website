@@ -93,6 +93,7 @@ npm run dev
 | POST | `/api/pet/feed` | 喂食：饱食度 +10 | 更新后的状态 |
 | POST | `/api/pet/pet` | 抚摸：愉悦度 +8、亲密度 +5 | 更新后的状态 |
 | POST | `/api/pet/walk` | 遛狗：随机彩蛋（捡到骨头愉悦 +1 / 交到新朋友亲密度 +10 / 什么也没发生），返回 `{ outcome, message, ... }` | 彩蛋结果 + 状态 |
+| GET | `/api/pet/weather` | 当前天气（Open-Meteo 免注册接口，重庆坐标；后端内存缓存 30 分钟，失败降级为阴天）。抚摸涨幅随天气变化：晴 +12 / 阴 +8 / 雨雪 +4 且亲密度额外 +2 | `{ icon, label, temperature, city, ... }` |
 
 所有指标上限为 100，满值后不再增加。
 

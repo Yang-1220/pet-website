@@ -44,3 +44,13 @@ export function renameDog(name) {
 export function getWeather() {
   return api.get('/weather').then((res) => res.data);
 }
+
+// 狗狗日记列表（分页，每页 3 条，最新在前）
+export function getDiary(page = 1) {
+  return api.get('/diary', { params: { page } }).then((res) => res.data);
+}
+
+// 写今天的日记（重复调用会覆盖当天那条）
+export function createDiary() {
+  return api.post('/diary').then((res) => res.data);
+}

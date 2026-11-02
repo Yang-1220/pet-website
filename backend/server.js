@@ -266,6 +266,105 @@ app.post('/api/pet/name', async (req, res) => {
   }
 });
 
+// ===== 狗狗日记 =====
+// 每天一条，按当天的心情、天气、互动次数生成一段"狗狗自述"
+const DIARY_TEMPLATES = {
+  happy: [
+    '今天吃了好多好吃的，主人还一直摸我，尾巴都要摇断了！',
+    '主人今天特别宠我，心情好到想满地打滚～',
+    '吃饱喝足还有人陪玩，我感觉自己是全世界最幸福的狗。'
+  ],
+  hungry: [
+    '肚子咕咕叫了……主人是不是把我忘了？',
+    '有点饿，也有点无聊，我趴在地上等开饭。',
+    '想去厨房门口蹲着，可主人好像没看见我。'
+  ],
+  sad: [
+    '今天有点低落，主人好像很忙，没怎么理我。',
+    '没什么精神，趴在窗边看了一下午的云。',
+    '有点想被摸摸头，可是不好意思开口。'
+  ],
+  normal: [
+    '今天也是平平淡淡的一天，吃饱了就睡，睡醒了就等主人。',
+    '家里很安静，我在客厅巡逻了两圈，没发现异常。',
+    '普通的一天，但我把尾巴摇给主人看了三次。'
+  ]
+};
+
+const WEATHER_DIARY_WORD = { sunny: '阳光很好', cloudy: '天有点阴', rain: '外面下着雨' };
+
+function pickOne(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// 生成（或覆盖）今天的日记
+async function generateTodayDiary() {
+  const stats = await readStats();
+  if (!stats) throw new Error('还没有狗狗状态数据');
+
+  const weather = await getWeather();
+
+  // 今天的互动次数（每次喂食/抚摸/散步都会写一条快照）
+  const [countRows] = await pool.query(
+    'SELECT COUNT(*) AS c FROM pet_stats_log WHERE DATE(created_at) = CURDATE()'
+  );
+  const interactions = Number(countRows[0].c) || 0;
+
+  // 狗狗名字
+  const [nameRows] = await pool.query('SELECT name FROM pet_info WHERE id = 1');
+  const name = nameRows[0] ? nameRows[0].name : DEFAULT_NAME;
+
+  // 心情判定（与前端表情规则一致）
+  let mood = 'normal';
+  if (stats.hunger < 30) mood = 'hungry';
+  else if (stats.happiness < 30) mood = 'sad';
+  else if (stats.hunger >= 70 && stats.happiness >= 70) mood = 'happy';
+
+  const weatherWord = WEATHER_DIARY_WORD[weather.category] || '天有点阴';
+  const body = pickOne(DIARY_TEMPLATES[mood]);
+  const content =
+    `${weather.icon} ${weatherWord}，今天主人和我互动了 ${interactions} 次。` +
+    `现在饱食度 ${stats.hunger}、愉悦度 ${stats.happiness}、亲密度 ${stats.intimacy}。${body}`;
+
+  await pool.query(
+    `INSERT INTO pet_diary (day, mood, weather, content)
+     VALUES (CURDATE(), ?, ?, ?)
+     ON DUPLICATE KEY UPDATE mood = VALUES(mood), weather = VALUES(weather), content = VALUES(content)`,
+    [mood, weather.category, content]
+  );
+
+  return { name, mood, weather: weather.category, interactions, content };
+}
+
+// 日记列表（分页，最新在前）
+app.get('/api/pet/diary', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = 3;
+    const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM pet_diary');
+    const [rows] = await pool.query(
+      `SELECT id, DATE_FORMAT(day, '%Y-%m-%d') AS day, mood, weather, content
+       FROM pet_diary ORDER BY day DESC LIMIT ? OFFSET ?`,
+      [pageSize, (page - 1) * pageSize]
+    );
+    res.json({ page, pageSize, total: Number(total), items: rows });
+  } catch (err) {
+    console.error('查询日记失败:', err.message);
+    res.status(500).json({ error: '数据库查询失败' });
+  }
+});
+
+// 写今天的日记（重复调用会覆盖当天那条）
+app.post('/api/pet/diary', async (req, res) => {
+  try {
+    const entry = await generateTodayDiary();
+    res.json(entry);
+  } catch (err) {
+    console.error('写日记失败:', err.message);
+    res.status(500).json({ error: '写日记失败' });
+  }
+});
+
 // 状态自然衰减：每 60 秒 hunger、happiness 各 -1，最低到 0，intimacy 不衰减
 // 只更新 pet_stats，不写入 pet_stats_log（自然衰减不算互动，不进周报快照）
 setInterval(async () => {
