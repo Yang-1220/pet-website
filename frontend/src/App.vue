@@ -40,7 +40,7 @@
         <transition name="bubble">
           <div v-if="bubbleVisible" class="bubble">{{ bubbleText }}</div>
         </transition>
-        <DogStage :action="dogAction" />
+        <DogStage :action="dogAction" :mood="mood" />
       </div>
 
       <!-- 狗狗心情留言 -->
@@ -148,6 +148,14 @@ function applyStats(data) {
   stats.happiness = data.happiness;
   stats.intimacy = data.intimacy;
 }
+
+// 狗狗表情心情：优先级 hungry（饿）> sad（难过）> happy（开心）> normal
+const mood = computed(() => {
+  if (stats.hunger < 30) return 'hungry';
+  if (stats.happiness < 30) return 'sad';
+  if (stats.hunger >= 70 && stats.happiness >= 70) return 'happy';
+  return 'normal';
+});
 
 // ===== 狗狗心情留言 =====
 // 根据饱食度/愉悦度挑选场景，每个场景随机轮换一句话；数值变化时自动更新
