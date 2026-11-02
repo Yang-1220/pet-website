@@ -39,3 +39,8 @@ export function getDogName() {
 export function renameDog(name) {
   return api.post('/name', { name }).then((res) => res.data);
 }
+
+// 当前天气（Open-Meteo，后端缓存 30 分钟）
+export function getWeather() {
+  return api.get('/weather').then((res) => res.data);
+}

@@ -3,6 +3,14 @@
     <header class="page-header">
       <h1>🐶 狗狗养成乐园</h1>
       <p class="subtitle">照顾好你的小狗伙伴吧！</p>
+      <div class="weather-bar">
+        <span class="weather-icon">{{ weather.icon }}</span>
+        <span class="weather-label">{{ weather.label }}</span>
+        <span v-if="weather.temperature !== null && weather.temperature !== undefined" class="weather-temp">
+          {{ Math.round(weather.temperature) }}°C
+        </span>
+        <span class="weather-city">· {{ weather.city }}</span>
+      </div>
       <div class="name-bar">
         <span class="dog-name">🐕 狗狗名字：<b>{{ dogName }}</b></span>
         <input
@@ -91,7 +99,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import DogStage from './components/DogStage.vue';
 import StatusBar from './components/StatusBar.vue';
 import WeeklyPanel from './components/WeeklyPanel.vue';
-import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog } from './api/pet';
+import { getStats, feedDog, petDog, walkDog, getWeekly, getDogName, renameDog, getWeather } from './api/pet';
 
 const stats = reactive({ hunger: 0, happiness: 0, intimacy: 0 });
 const busy = ref(false);        // 防止连点
@@ -104,6 +112,7 @@ const bubbleText = ref('');
 const weekly = ref([]);           // 最近 7 天趋势数据（狗狗周报）
 const dogName = ref('小狗狗');    // 狗狗名字（未取名时为默认名）
 const nameInput = ref('');        // 取名输入框
+const weather = ref({ icon: '☁️', label: '阴天', temperature: null, city: '重庆' }); // 当前天气
 let floatId = 0;
 let bubbleTimer = null;
 let feedAnimTimer = null;
@@ -182,6 +191,15 @@ async function loadName() {
     dogName.value = (await getDogName()).name;
   } catch (err) {
     console.error('名字加载失败:', err);
+  }
+}
+
+// 加载当前天气（后端已缓存 30 分钟，前端轮询开销很小）；失败时保留上一次的值
+async function loadWeather() {
+  try {
+    weather.value = await getWeather();
+  } catch (err) {
+    console.error('天气加载失败:', err);
   }
 }
 
@@ -275,6 +293,7 @@ async function handleWalk() {
 // 自动刷新：每 5 秒拉取最新状态与周报，更新状态条和折线图
 async function refreshAll() {
   loadWeekly();
+  loadWeather();
   try {
     applyStats(await getStats());
     errorMsg.value = ''; // 恢复连接后自动清除错误提示
@@ -286,6 +305,7 @@ async function refreshAll() {
 onMounted(() => {
   refreshAll();
   loadName();
+  loadWeather();
   refreshTimer = setInterval(refreshAll, 5000);
 });
 
@@ -313,6 +333,39 @@ onUnmounted(() => {
   margin-top: 6px;
   color: #9b8271;
   font-size: 14px;
+}
+
+/* 天气条 */
+.weather-bar {
+  margin: 10px auto 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid #f2e2cd;
+  font-size: 13px;
+  color: #7a5c43;
+  box-shadow: 0 2px 8px rgba(214, 175, 130, 0.15);
+}
+
+.weather-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.weather-label {
+  font-weight: 600;
+}
+
+.weather-temp {
+  color: #d97b29;
+  font-weight: 600;
+}
+
+.weather-city {
+  color: #a8927e;
 }
 
 /* 取名栏 */

@@ -20,6 +20,77 @@ const DEFAULT_NAME = '小狗狗';   // 未取名时显示的默认名字
 const MAX_NAME_LENGTH = 12;      // 名字最大长度
 const DECAY_INTERVAL_MS = 60 * 1000; // 状态自然衰减周期：60 秒
 
+// ===== 天气接入（Open-Meteo 免注册接口，重庆坐标） =====
+const WEATHER_URL = 'https://api.open-meteo.com/v1/forecast?latitude=29.56&longitude=106.55&current=temperature_2m,weather_code';
+const WEATHER_CACHE_MS = 30 * 60 * 1000; // 天气内存缓存：30 分钟
+const PET_HAPPINESS_BY_WEATHER = { sunny: 12, cloudy: 8, rain: 4 }; // 天气对抚摸愉悦度的加成
+const RAIN_EXTRA_INTIMACY = 2; // 雨天抚摸亲密度额外加成
+
+// WMO 天气代码 → 分类 / 文案 / 图标
+const WEATHER_CODE_MAP = [
+  { min: 0, max: 1, category: 'sunny', label: '晴', icon: '☀️' },
+  { min: 2, max: 3, category: 'cloudy', label: '阴', icon: '☁️' },
+  { min: 45, max: 48, category: 'cloudy', label: '雾', icon: '🌫️' },
+  { min: 51, max: 67, category: 'rain', label: '雨', icon: '🌧️' },
+  { min: 71, max: 77, category: 'rain', label: '雪', icon: '❄️' },
+  { min: 80, max: 82, category: 'rain', label: '阵雨', icon: '🌧️' },
+  { min: 95, max: 99, category: 'rain', label: '雷雨', icon: '⛈️' }
+];
+
+// 接口失败时的降级天气：阴天（雪天按雨天处理，同样算坏天气）
+const WEATHER_FALLBACK = { category: 'cloudy', label: '阴', icon: '☁️', temperature: null, city: '重庆', fallback: true };
+
+let weatherCache = null; // { data, fetchedAt }
+
+function classifyWeather(code) {
+  return (
+    WEATHER_CODE_MAP.find((r) => code >= r.min && code <= r.max) || {
+      category: 'cloudy', label: '阴', icon: '☁️'
+    }
+  );
+}
+
+async function fetchWeather() {
+  try {
+    const resp = await fetch(WEATHER_URL, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const cur = data.current || {};
+    const { category, label, icon } = classifyWeather(cur.weather_code ?? 3);
+    const weather = {
+      category,
+      label,
+      icon,
+      temperature: typeof cur.temperature_2m === 'number' ? cur.temperature_2m : null,
+      city: '重庆',
+      fallback: false
+    };
+    weatherCache = { data: weather, fetchedAt: Date.now() };
+    return weather;
+  } catch (err) {
+    console.error('获取天气失败，降级为阴天:', err.message);
+    return WEATHER_FALLBACK; // 不写缓存，下次请求会重试
+  }
+}
+
+// 优先读 30 分钟内存缓存，过期才请求 Open-Meteo
+async function getWeather() {
+  if (weatherCache && Date.now() - weatherCache.fetchedAt < WEATHER_CACHE_MS) {
+    return weatherCache.data;
+  }
+  return fetchWeather();
+}
+
+// 当前天气：后端内存缓存 30 分钟，任何异常都降级为阴天，保证前端永远拿得到数据
+app.get('/api/pet/weather', async (req, res) => {
+  try {
+    res.json(await getWeather());
+  } catch (err) {
+    console.error('天气接口异常:', err.message);
+    res.json(WEATHER_FALLBACK);
+  }
+});
+
 // 读取狗狗状态（pet_stats 表固定只有一行，id = 1）
 async function readStats() {
   const [rows] = await pool.query(
@@ -71,15 +142,22 @@ app.post('/api/pet/feed', async (req, res) => {
   }
 });
 
-// 抚摸：愉悦度 +8，亲密度 +5（不超过 100）
+// 抚摸：愉悦度/亲密度涨幅随天气变化（晴天 +12、阴天 +8、雨天 +4 且亲密度额外 +2）
 app.post('/api/pet/pet', async (req, res) => {
   try {
+    const weather = await getWeather();
+    const happinessGain = PET_HAPPINESS_BY_WEATHER[weather.category] ?? PET_HAPPINESS;
+    const intimacyGain = PET_INTIMACY + (weather.category === 'rain' ? RAIN_EXTRA_INTIMACY : 0);
     await pool.query(
       'UPDATE pet_stats SET happiness = LEAST(?, happiness + ?), intimacy = LEAST(?, intimacy + ?) WHERE id = 1',
-      [MAX_VALUE, PET_HAPPINESS, MAX_VALUE, PET_INTIMACY]
+      [MAX_VALUE, happinessGain, MAX_VALUE, intimacyGain]
     );
     await logStats();
-    res.json(await readStats());
+    res.json({
+      ...(await readStats()),
+      gains: { happiness: happinessGain, intimacy: intimacyGain },
+      weather: weather.category
+    });
   } catch (err) {
     console.error('抚摸失败:', err.message);
     res.status(500).json({ error: '数据库更新失败' });
